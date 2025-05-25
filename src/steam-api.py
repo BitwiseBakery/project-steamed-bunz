@@ -5,50 +5,58 @@ from avro.io import DatumWriter
 import avro.schema
 from pathlib import Path
 from google.cloud import storage
+from datetime import datetime
 import os
 
 DATA_PATH = Path(__file__).resolve().parent / "data"
 CATALOGUE_JSON_PATH = DATA_PATH / "catalogue.json"
 CATALOGUE_AVRO_PATH = DATA_PATH / "calalogue.avro"
 
-# # Fetch and save JSON data
-# url = f"https://api.steampowered.com/ISteamApps/GetAppList/v2/"
+# Fetch and save JSON data
+url = f"https://api.steampowered.com/ISteamApps/GetAppList/v2/"
 
-# response = httpx.get(url)
+response = httpx.get(url)
 
-# # Write JSON data to file
-# with open(CATALOGUE_JSON_PATH, "w") as f:
-#     json.dump(response.json(), f)
+# Write JSON data to file
+with open(CATALOGUE_JSON_PATH, "w") as f:
+    json.dump(response.json(), f)
 
-# # Load JSON data
-# with open(CATALOGUE_JSON_PATH, "r") as f:
-#     json_data = json.load(f)
+# Load JSON data
+with open(CATALOGUE_JSON_PATH, "r") as f:
+    json_data = json.load(f)
 
-# # Extract the list of apps
-# apps = json_data["applist"]["apps"]
+# Extract the list of apps
+apps = json_data["applist"]["apps"]
 
-# # Define Avro schema
-# schema = avro.schema.parse(json.dumps({
-#     "type": "record",
-#     "name": "App",
-#     "fields": [
-#         {"name": "appid", "type": "long"},
-#         {"name": "name", "type": "string"}
-#     ]
-# }))
+# Add a new column to the apps list with the date of the extraction as days since the Unix epoch
+current_date = datetime.now().date().isoformat()
+# current_epoch_time = (current_date - epoch_start).days
+for app in apps:
+    app["data_extr_date"] = current_date
 
-# # Write to Avro
-# with open(CATALOGUE_AVRO_PATH, 'wb') as out:
-#     writer = DataFileWriter(out, DatumWriter(), schema)
-#     for app in apps:
-#         writer.append(app)
-#     writer.close()
+# Define Avro schema
+schema = avro.schema.parse(json.dumps({
+    "type": "record",
+    "name": "App",
+    "fields": [
+        {"name": "appid", "type": "long"},
+        {"name": "name", "type": "string"},
+        {"name": "data_extr_date", "type": "string"}
+    ]
+}))
+
+# Write to Avro
+with open(CATALOGUE_AVRO_PATH, 'wb') as out:
+    writer = DataFileWriter(out, DatumWriter(), schema)
+    for app in apps:
+        writer.append(app)
+    writer.close()
 
 
 # Set up GCS Bucket connection
 
 # Path to the service account key
-SERVICE_ACCOUNT_KEY_PATH = Path(__file__).resolve().parent.parent / "Credentials" / "service-key.json"
+SERVICE_ACCOUNT_KEY_PATH = Path(__file__).resolve().parent.parent / "Credentials" / "bitwisebakery-sa.json"
 
 # Set up GCS Bucket connection
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(SERVICE_ACCOUNT_KEY_PATH)
@@ -56,7 +64,7 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(SERVICE_ACCOUNT_KEY_PATH)
 # Uploading an object
 def upload_to_bucket(bucket_name, source_file_name, destination_blob_name):
     # Initialize a storage client
-    client = storage.Client(project="steamed-bunz",credentials=SERVICE_ACCOUNT_KEY_PATH)
+    client = storage.Client.from_service_account_json(SERVICE_ACCOUNT_KEY_PATH)
 
     # Get the bucket
     bucket = client.bucket(bucket_name)
