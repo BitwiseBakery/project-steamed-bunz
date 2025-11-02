@@ -1,0 +1,81 @@
+MERGE prep_steam.catalogue P
+USING raw_steam.catalogue R
+ON P.appid = R.appid WHEN MATCHED
+AND P.data_extr_date < DATE(R.data_extr_date)
+THEN UPDATE SET name = R.name,
+data_extr_date = DATE(R.data_extr_date) WHEN NOT MATCHED THEN INSERT (appid, name, data_extr_date)
+VALUES (R.appid, R.name, DATE(R.data_extr_date))
+
+
+
+https://github.com/Revadike/InternalSteamWebAPI/wiki/Get-App-Details
+
+request details:
+Authenticated: No
+Method: GET
+Host: store.steampowered.com
+Path: /api/appdetails
+parameters:
+Name		Type	Required	Description
+appids:		string	Yes			CSV of Steam AppIDs to return details of (max 100).
+client:		TODO	No			TODO
+filters:	string	No			CSV list of keys to return, e.g. name,platforms,price_overview.
+cc:			string	No			Country code
+language:	string	No			Language
+
+Example call: GET https://store.steampowered.com/api/appdetails?appids=440
+
+
+attributes to get for each appid:
+:appid.data.type	string	Observed values: "game", "dlc", "demo", "advertising", "mod", "video".
+:appid.data.release_date	object	TODO
+:appid.data.release_date.coming_soon	boolean	true if unreleased, false if released.
+:appid.data.release_date.date	string	Format is localized, according to the cc parameter passed. Is an empty string when date is unannounced.
+:appid.data.developers[]	array	TODO
+:appid.data.publishers[]	array	TODO
+:appid.data.genres[]	array	The app genres. May be omitted.
+:appid.data.genres[].id	string	TODO
+:appid.data.genres[].description	string	TODO
+:appid.data.categories[]	array	The app categories. May be omitted.
+:appid.data.categories[].id	number	TODO
+:appid.data.categories[].description	string	TODO
+:appid.data.content_descriptors	object	TODO
+:appid.data.content_descriptors.ids[]	array	TODO
+:appid.data.content_descriptors.notes	string	TODO
+:appid.data.required_age	number	TODO
+:appid.data.platforms	object	TODO
+:appid.data.platforms.windows	boolean	TODO
+:appid.data.platforms.mac	boolean	TODO
+:appid.data.platforms.linux	boolean	TODO
+:appid.data.achievements	object	The app achievements. May be omitted.
+:appid.data.achievements.total	number	TODO
+
+-- ratings and reviews - may need its own snapshot table
+:appid.data.recommendations	object	The app reviews. May be omitted.
+:appid.data.recommendations.total	number	TODO
+:appid.data.metacritic	object	Metacritic information. May be omitted.
+:appid.data.metacritic.score	number	TODO
+:appid.data.metacritic.url	string	TODO
+
+-- pricing may be its own table and pipeline - snapshot
+:appid.data.is_free	boolean	TODO
+:appid.data.price_overview	object	The price information. May be omitted, if free-to-play.
+:appid.data.price_overview.currency	string	Currency prices are denoted in.
+:appid.data.price_overview.initial	number	Pre-discount price.
+:appid.data.price_overview.final	number	Post-discount price.
+:appid.data.price_overview.discount_percent	number	Discount percentage.
+:appid.data.price_overview.initial_formatted	string	TODO
+:appid.data.price_overview.final_formatted	string	TODO
+
+-- todo:
+-- review counts and ratings were recently split by region - do we need to create a script which runs in several regions to get the full picture?
+-- will need a job to refresh release dates for all titles marked coming soon
+
+
+'https://store.steampowered.com/api/appdetails?appids=1312081
+%2C1983382%2C1275822%2C1941401%2C1977312%2C1360782%2C3461880%2C3545010%2C3328600%2C1211682%2C2103930%2C3407390%2C3646520%2C1200349%2C924420%2C3027670%2C3059890%2C2466030%2C3701500%2C509703%2C802530%2C1502300%2C2760630%2C3291450%2C2366640%2C1443590%2C2409680%2C2624380%2C1529710%2C3726610%2C2472300%2C3909430%2C3363110%2C3519570%2C388390%2C2255270%2C3363140%2C940770%2C2077480%2C3675370%2C1377600%2C1921480%2C3498630%2C392190%2C635780%2C508290%2C1059220%2C3391910%2C1290620%2C2582450%2C2577100%2C1870680%2C2751210%2C568330%2C2672420%2C2388360%2C1823340%2C1500080%2C2065890%2C2876140%2C2442610%2C3347280%2C746970%2C1832360%2C1259250%2C3683060%2C275805%2C564681%2C82155%2C211670%2C211692%2C3246310%2C3246340%2C3246370%2C2706960%2C3181320%2C975450%2C278440%2C2885400%2C835140%2C2493160%2C1587630%2C2209310%2C1271540%2C2989100%2C2063380%2C3409860%2C1556920%2C2069890%2C3406660%2C1782130%2C3014150%2C1564540%2C1015140%2C478200%2C1846020%2C852190%2C3798960%2C3833250%2C2845270'
+
+
+bring my own:
+3085820
+282800
