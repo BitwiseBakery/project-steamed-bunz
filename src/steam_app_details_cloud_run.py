@@ -59,8 +59,8 @@ def chunked(iterable, size):
 
 
 # Rate limiting / retry configuration (can be tuned via env vars)
-BATCH_DELAY_SECONDS = float(os.environ.get("STEAM_BATCH_DELAY_SECONDS", "0.2"))
-MAX_RETRIES = int(os.environ.get("STEAM_MAX_RETRIES", "2"))
+BATCH_DELAY_SECONDS = float(os.environ.get("STEAM_BATCH_DELAY_SECONDS", "1.0"))
+MAX_RETRIES = int(os.environ.get("STEAM_MAX_RETRIES", "3"))
 BACKOFF_BASE = float(os.environ.get("STEAM_BACKOFF_BASE", "1.0"))
 BACKOFF_MAX = float(os.environ.get("STEAM_BACKOFF_MAX", "5.0"))
 HTTPX_TIMEOUT = float(os.environ.get("HTTPX_TIMEOUT", "5.0"))
@@ -179,21 +179,62 @@ def extract_fields(appid, app_payload):
     out["publishers"] = d.get("publishers")
 
     # genres and categories (keep as arrays of objects, but add counts)
+    # Ensure types match Avro schema: Genre.id -> string|null, Category.id -> long|null
     genres = d.get("genres") or []
-    out["genres"] = [{"id": g.get("id"), "description": g.get("description")} for g in genres]
+    genres_out = []
+    for g in genres:
+        gid = g.get("id")
+        # normalize genre id to string if present
+        gid_norm = None
+        if gid is not None:
+            try:
+                gid_norm = str(gid)
+            except Exception:
+                gid_norm = None
+        genres_out.append({"id": gid_norm, "description": g.get("description")})
+    out["genres"] = genres_out
     out["genres_count"] = len(genres)
 
     categories = d.get("categories") or []
-    out["categories"] = [{"id": c.get("id"), "description": c.get("description")} for c in categories]
+    categories_out = []
+    for c in categories:
+        cid = c.get("id")
+        cid_norm = None
+        if cid is not None:
+            try:
+                # Avro expects a long (int) for category id
+                cid_norm = int(cid)
+            except Exception:
+                cid_norm = None
+        categories_out.append({"id": cid_norm, "description": c.get("description")})
+    out["categories"] = categories_out
     out["categories_count"] = len(categories)
 
     # content_descriptors: flatten notes and keep ids array + count
     cd = d.get("content_descriptors") or {}
-    out["content_descriptors_ids"] = cd.get("ids")
-    out["content_descriptors_ids_count"] = len(cd.get("ids") or [])
+    # normalize content descriptor ids to integers
+    cd_ids = cd.get("ids") or []
+    cd_ids_norm = []
+    for cid in cd_ids:
+        try:
+            cd_ids_norm.append(int(cid))
+        except Exception:
+            # skip ids that can't be parsed as int
+            continue
+    out["content_descriptors_ids"] = cd_ids_norm
+    out["content_descriptors_ids_count"] = len(cd_ids_norm)
 
     # required age
-    out["required_age"] = d.get("required_age")
+    # required_age should be an integer (or None)
+    req_age = d.get("required_age")
+    if req_age is None:
+        out["required_age"] = None
+    else:
+        try:
+            out["required_age"] = int(req_age)
+        except Exception:
+            # sometimes the field is a non-numeric string; coerce to None
+            out["required_age"] = None
 
     # platforms -> flatten into platform_* boolean columns
     platforms = d.get("platforms") or {}
@@ -203,7 +244,15 @@ def extract_fields(appid, app_payload):
 
     # achievements -> flatten total into a top-level column
     achievements = d.get("achievements") or {}
-    out["achievements_total_count"] = achievements.get("total")
+    # ensure achievements total is an int or None
+    ach_total = achievements.get("total")
+    if ach_total is None:
+        out["achievements_total_count"] = None
+    else:
+        try:
+            out["achievements_total_count"] = int(ach_total)
+        except Exception:
+            out["achievements_total_count"] = None
 
     return out
 
@@ -215,6 +264,110 @@ def upload_json_blob(bucket, blob_name, local_path, content_type=None):
         blob.upload_from_filename(str(local_path), content_type=content_type)
     else:
         blob.upload_from_filename(str(local_path))
+
+
+def _sanitize_record_for_avro(rec):
+    """Return a copy of rec where fields are coerced to types matching _AVRO_SCHEMA.
+
+    Coercions applied:
+    - appid -> str
+    - type -> str or None
+    - release_date_coming_soon -> bool or None
+    - release_date -> str or None
+    - developers/publishers -> list of str or None
+    - genres -> list of {id: str|null, description: str|null}
+    - categories -> list of {id: int|null, description: str|null}
+    - content_descriptors_ids -> list of int
+    - required_age -> int or None
+    - platform_* -> bool or None
+    - achievements_total_count -> int or None
+    """
+    out = {}
+    # appid
+    out["appid"] = str(rec.get("appid")) if rec.get("appid") is not None else ""
+
+    # simple scalar nullable string
+    out["type"] = rec.get("type") if isinstance(rec.get("type"), str) else (str(rec.get("type")) if rec.get("type") is not None else None)
+
+    # release date fields
+    out["release_date_coming_soon"] = rec.get("release_date_coming_soon") if isinstance(rec.get("release_date_coming_soon"), bool) else None
+    out["release_date"] = rec.get("release_date") if isinstance(rec.get("release_date"), str) else (str(rec.get("release_date")) if rec.get("release_date") is not None else None)
+
+    # developers / publishers: ensure lists of strings or None
+    def _norm_str_list(val):
+        if val is None:
+            return None
+        try:
+            return [str(x) for x in val]
+        except Exception:
+            return None
+
+    out["developers"] = _norm_str_list(rec.get("developers"))
+    out["publishers"] = _norm_str_list(rec.get("publishers"))
+
+    # genres and categories already normalized by extract_fields but be defensive
+    def _norm_genres(genres):
+        if not genres:
+            return None
+        out_g = []
+        for g in genres:
+            gid = g.get("id") if isinstance(g, dict) else None
+            gid_norm = str(gid) if gid is not None else None
+            desc = g.get("description") if isinstance(g, dict) else None
+            out_g.append({"id": gid_norm, "description": desc})
+        return out_g
+
+    def _norm_categories(cats):
+        if not cats:
+            return None
+        out_c = []
+        for c in cats:
+            cid = c.get("id") if isinstance(c, dict) else None
+            try:
+                cid_norm = int(cid) if cid is not None else None
+            except Exception:
+                cid_norm = None
+            desc = c.get("description") if isinstance(c, dict) else None
+            out_c.append({"id": cid_norm, "description": desc})
+        return out_c
+
+    out["genres"] = _norm_genres(rec.get("genres"))
+    out["genres_count"] = rec.get("genres_count") if isinstance(rec.get("genres_count"), int) else (int(rec.get("genres_count")) if rec.get("genres_count") is not None else None)
+    out["categories"] = _norm_categories(rec.get("categories"))
+    out["categories_count"] = rec.get("categories_count") if isinstance(rec.get("categories_count"), int) else (int(rec.get("categories_count")) if rec.get("categories_count") is not None else None)
+
+    # content descriptors ids -> list of ints
+    cd_ids = rec.get("content_descriptors_ids") or []
+    cd_norm = []
+    for cid in cd_ids:
+        try:
+            cd_norm.append(int(cid))
+        except Exception:
+            continue
+    out["content_descriptors_notes"] = rec.get("content_descriptors_notes") if isinstance(rec.get("content_descriptors_notes"), str) else None
+    out["content_descriptors_ids"] = cd_norm if cd_norm else []
+    out["content_descriptors_ids_count"] = len(cd_norm)
+
+    # required_age
+    req = rec.get("required_age")
+    try:
+        out["required_age"] = int(req) if req is not None else None
+    except Exception:
+        out["required_age"] = None
+
+    # platforms
+    out["platform_windows"] = bool(rec.get("platform_windows")) if rec.get("platform_windows") is not None else None
+    out["platform_mac"] = bool(rec.get("platform_mac")) if rec.get("platform_mac") is not None else None
+    out["platform_linux"] = bool(rec.get("platform_linux")) if rec.get("platform_linux") is not None else None
+
+    # achievements
+    ach = rec.get("achievements_total_count")
+    try:
+        out["achievements_total_count"] = int(ach) if ach is not None else None
+    except Exception:
+        out["achievements_total_count"] = None
+
+    return out
 
 
 @functions_framework.http
@@ -348,10 +501,24 @@ def steam_app_details_worker(request):
                 "achievements_total_count": reduced.get("achievements_total_count"),
             }
 
-            with open(local_file, "wb") as out:
-                writer = DataFileWriter(out, DatumWriter(), _AVRO_SCHEMA)
-                writer.append(record)
-                writer.close()
+            # sanitize the record to match Avro types and write defensively
+            record_sanitized = _sanitize_record_for_avro(record)
+            try:
+                with open(local_file, "wb") as out:
+                    writer = DataFileWriter(out, DatumWriter(), _AVRO_SCHEMA)
+                    writer.append(record_sanitized)
+                    writer.close()
+            except Exception as e:
+                # Catch Avro type errors and log the problematic record for debugging
+                logger.exception("Avro write failed for appid %s: %s. Record: %s", aid, e, record_sanitized)
+                errors.append({"appid": aid, "error": f"avro_write_failed: {e}", "record": record_sanitized})
+                # skip uploading this file and continue
+                try:
+                    if local_file.exists():
+                        local_file.unlink()
+                except Exception:
+                    pass
+                continue
 
             blob_name = f"{DEST_PREFIX}/basic_data_app_{aid}.avro" if DEST_PREFIX else f"basic_data_app_{aid}.avro"
             # Upload Avro with a binary content type
